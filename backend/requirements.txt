@@ -4,7 +4,7 @@ pydantic==2.9.0
 pydantic-settings==2.5.0
 python-multipart==0.0.9
 httpx==0.27.0
-pymupdf==1.24.0
+pymupdf>=1.25.0
 qdrant-client>=1.11.0
 langgraph>=0.2.0
 langchain-core>=0.2.27,<0.3
