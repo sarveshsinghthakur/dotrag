@@ -3,8 +3,8 @@ services:
     name: dotrag-backend
     runtime: python
     pythonVersion: "3.12"
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    buildCommand: cd backend && pip install -r requirements.txt
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: MISTRAL_API_KEY
         sync: false
@@ -15,18 +15,19 @@ services:
       - key: QDRANT_URL
         sync: false
       - key: QDRANT_API_KEY
-        sync: false
+        value: ""
       - key: DATABASE_URL
-        sync: false
+        value: ""
       - key: REDIS_URL
-        sync: false
+        value: ""
+      - key: FRONTEND_URL
+        value: https://dotrag-1.onrender.com
     healthCheckPath: /health
-    rootDir: backend
 
   - type: web
     name: dotrag-frontend
     runtime: static
-    buildCommand: npm install && npm run build
+    buildCommand: cd frontend && npm install && npm run build
     staticPublishPath: frontend/dist
     routes:
       - type: rewrite
