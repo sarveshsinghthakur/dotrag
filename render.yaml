@@ -9,7 +9,7 @@ services:
       - key: MISTRAL_API_KEY
         sync: false
       - key: MISTRAL_CHAT_MODEL
-        value: mistral-large-latest
+        value: ministral-8b-latest
       - key: MISTRAL_EMBEDDING_MODEL
         value: mistral-embed
       - key: QDRANT_URL
@@ -22,6 +22,18 @@ services:
         value: ""
       - key: FRONTEND_URL
         value: https://dotrag-1.onrender.com
+      - key: CHUNK_SIZE
+        value: "1024"
+      - key: CHUNK_OVERLAP
+        value: "256"
+      - key: RETRIEVAL_TOP_K
+        value: "8"
+      - key: RERANK_TOP_K
+        value: "5"
+      - key: MAX_UPLOAD_SIZE_MB
+        value: "100"
+      - key: OCR_ENABLED
+        value: "true"
     healthCheckPath: /health
 
   - type: web
