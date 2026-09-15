@@ -1,63 +1,216 @@
 import { useState, useRef, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
-  ArrowLeft, Send, Loader2, FileText,
-  ExternalLink, Paperclip
+  ArrowLeft, Send, Loader2, FileText, Image as ImageIcon,
+  ExternalLink, Paperclip, BookOpen, Zap, Library, Lock,
+  ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { api } from '../services/api';
-import type { ChatMessage, Citation, Document } from '../types';
+import type { ChatMessage, Citation, Document, UploadOptions } from '../types';
 
 interface ChatPanelProps {
   selectedDocIds: string[];
   onBack: () => void;
   documents: Document[];
-  onUpload: (file: File) => Promise<unknown>;
+  onUpload: (file: File, options?: UploadOptions) => Promise<unknown>;
   onRefresh: () => void;
+  conversationId?: string;
+  onConversationIdChange?: (id: string) => void;
 }
 
-export default function ChatPanel({ selectedDocIds, onBack, documents, onUpload, onRefresh }: ChatPanelProps) {
+// ─── Markdown renderer ────────────────────────────────────────────────────────
+function MessageContent({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        h1: ({ children }) => <h1 className="text-base font-bold font-mono mt-3 mb-1 text-white">{children}</h1>,
+        h2: ({ children }) => <h2 className="text-sm font-bold font-mono mt-3 mb-1 text-white">{children}</h2>,
+        h3: ({ children }) => <h3 className="text-sm font-semibold mt-2 mb-1 text-white/90">{children}</h3>,
+        p:  ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed text-white/90">{children}</p>,
+        ul: ({ children }) => <ul className="my-2 space-y-0.5 pl-4">{children}</ul>,
+        ol: ({ children }) => <ol className="my-2 space-y-0.5 pl-4 list-decimal">{children}</ol>,
+        li: ({ children }) => (
+          <li className="text-white/90 before:content-['·'] before:mr-2 before:text-dot-dim">{children}</li>
+        ),
+        code: ({ inline, children, ...props }: any) =>
+          inline ? (
+            <code className="px-1.5 py-0.5 bg-white/10 text-green-300 font-mono text-xs rounded" {...props}>
+              {children}
+            </code>
+          ) : (
+            <code className="block p-3 my-2 bg-black/50 border border-white/10 font-mono text-xs text-green-300 overflow-x-auto" {...props}>
+              {children}
+            </code>
+          ),
+        pre: ({ children }) => <pre className="overflow-x-auto">{children}</pre>,
+        blockquote: ({ children }) => (
+          <blockquote className="border-l-2 border-dot-dim/50 pl-3 my-2 italic text-dot-dim">{children}</blockquote>
+        ),
+        strong: ({ children }) => <strong className="font-bold text-white">{children}</strong>,
+        em:     ({ children }) => <em className="italic text-white/80">{children}</em>,
+        hr: () => <hr className="my-3 border-dot-dim/30" />,
+        a: ({ href, children }) => (
+          <a href={href} target="_blank" rel="noopener noreferrer"
+             className="text-white underline underline-offset-2 hover:text-dot-dim transition-colors">
+            {children}
+          </a>
+        ),
+        table: ({ children }) => (
+          <div className="my-2 overflow-x-auto">
+            <table className="text-xs border-collapse w-full">{children}</table>
+          </div>
+        ),
+        th: ({ children }) => (
+          <th className="border border-dot-dim/30 px-2 py-1 font-mono font-bold text-left bg-white/5">{children}</th>
+        ),
+        td: ({ children }) => (
+          <td className="border border-dot-dim/30 px-2 py-1">{children}</td>
+        ),
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
+
+// ─── Status indicator ─────────────────────────────────────────────────────────
+function StatusPill({ status }: { status: string }) {
+  const map: Record<string, string> = {
+    'analyzing query':          'Analyzing…',
+    'searching documents':      'Searching…',
+    'generating response':      'Generating…',
+    'vector search unavailable': 'No vector DB',
+    'no documents in scope':    'No docs in scope',
+    'complete':                 'Done',
+  };
+  const label = map[status] ?? status;
+  if (!label || status === 'complete') return null;
+
+  return (
+    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-mono text-dot-dim border border-dot-dim/20 bg-white/3">
+      <span className="w-1.5 h-1.5 rounded-full bg-white/60 status-pulse inline-block" />
+      {label}
+    </span>
+  );
+}
+
+// ─── File icon ────────────────────────────────────────────────────────────────
+function DocFileIcon({ fileType }: { fileType?: string }) {
+  if (fileType === 'image') return <ImageIcon className="w-3 h-3 text-dot-dim" />;
+  return <FileText className="w-3 h-3 text-dot-dim" />;
+}
+
+// ─── Scope badge ──────────────────────────────────────────────────────────────
+function ScopeBadge({ scope }: { scope: 'library' | 'chat' }) {
+  return scope === 'library' ? (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-mono text-emerald-400/70 border border-emerald-400/20 bg-emerald-400/5">
+      <Library className="w-2.5 h-2.5" />lib
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-mono text-yellow-400/70 border border-yellow-400/20 bg-yellow-400/5">
+      <Lock className="w-2.5 h-2.5" />chat
+    </span>
+  );
+}
+
+// ─── Document context panel ───────────────────────────────────────────────────
+function ContextPanel({
+  docs,
+  conversationId,
+}: {
+  docs: Document[];
+  conversationId?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const libraryDocs = docs.filter((d) => d.scope === 'library' && d.status === 'ready');
+  const chatDocs    = docs.filter((d) => d.scope === 'chat' && d.status === 'ready' && d.conversation_id === conversationId);
+  const total = libraryDocs.length + chatDocs.length;
+
+  if (total === 0) return null;
+
+  return (
+    <div className="border-b border-white/8 bg-white/2">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center justify-between px-4 py-2 text-xs font-mono text-dot-dim hover:text-white transition-colors"
+      >
+        <span className="flex items-center gap-1.5">
+          <BookOpen className="w-3 h-3" />
+          {total} doc{total !== 1 ? 's' : ''} in context
+          {libraryDocs.length > 0 && (
+            <span className="text-emerald-400/60 ml-1">{libraryDocs.length} lib</span>
+          )}
+          {chatDocs.length > 0 && (
+            <span className="text-yellow-400/60 ml-1">{chatDocs.length} chat</span>
+          )}
+        </span>
+        {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+      </button>
+      {expanded && (
+        <div className="px-4 pb-2 space-y-1">
+          {libraryDocs.map((d) => (
+            <div key={d.id} className="flex items-center gap-2">
+              <DocFileIcon fileType={d.file_type} />
+              <span className="text-xs text-dot-dim truncate flex-1">{d.filename}</span>
+              <ScopeBadge scope="library" />
+            </div>
+          ))}
+          {chatDocs.map((d) => (
+            <div key={d.id} className="flex items-center gap-2">
+              <DocFileIcon fileType={d.file_type} />
+              <span className="text-xs text-dot-dim truncate flex-1">{d.filename}</span>
+              <ScopeBadge scope="chat" />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
+export default function ChatPanel({
+  selectedDocIds,
+  onBack,
+  documents,
+  onUpload,
+  onRefresh,
+  conversationId: initialConvId,
+  onConversationIdChange,
+}: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
-  const [conversationId, setConversationId] = useState<string | undefined>();
+  const [conversationId, setConversationId] = useState<string | undefined>(initialConvId);
   const [status, setStatus] = useState<string>('');
   const [isUploading, setIsUploading] = useState(false);
-  const [localDocIds, setLocalDocIds] = useState<string[]>(selectedDocIds);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const inputRef       = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef   = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Sync selectedDocIds with local state
-  useEffect(() => {
-    setLocalDocIds(selectedDocIds);
-  }, [selectedDocIds]);
-
-  // Auto-select all ready documents if none selected
-  useEffect(() => {
-    if (localDocIds.length === 0 && documents.length > 0) {
-      const readyDocs = documents.filter(d => d.status === 'ready');
-      if (readyDocs.length > 0) {
-        setLocalDocIds(readyDocs.map(d => d.id));
-      }
-    }
-  }, [documents]);
+  // Resolve doc IDs for this session — backend handles scope, but we
+  // pass empty array to let the backend auto-resolve via conversation context.
+  const resolvedDocIds = selectedDocIds.length > 0 ? selectedDocIds : [];
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     setIsUploading(true);
     try {
-      const result = await onUpload(file);
-      const newDoc = (result as any).document;
-      if (newDoc) {
-        setLocalDocIds(prev => [...prev, newDoc.id]);
-        // Wait for processing and refresh
-        setTimeout(() => onRefresh(), 2000);
-      }
+      await onUpload(file, {
+        scope: 'chat',
+        conversation_id: conversationId,
+      });
+      // Poll for processing completion
+      setTimeout(() => onRefresh(), 1500);
+      setTimeout(() => onRefresh(), 4000);
     } catch (err) {
       console.error('Upload failed:', err);
     } finally {
@@ -70,28 +223,31 @@ export default function ChatPanel({ selectedDocIds, onBack, documents, onUpload,
     e.preventDefault();
     if (!input.trim() || isStreaming) return;
 
+    const query = input.trim();
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
       role: 'user',
-      content: input.trim(),
+      content: query,
       timestamp: new Date().toISOString(),
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    setMessages((prev) => [...prev, userMessage]);
     setInput('');
     setIsStreaming(true);
     setStatus('analyzing query');
 
+    const assistantId = 'assistant-' + Date.now();
+    setMessages((prev) => [
+      ...prev,
+      { id: assistantId, role: 'assistant', content: '', timestamp: new Date().toISOString() },
+    ]);
+
     try {
       let fullResponse = '';
       let citations: Citation[] = [];
-      let newConversationId = conversationId;
 
-      const stream = api.chatStream(
-        input.trim(),
-        conversationId,
-        localDocIds
-      );
+      // Pass conversationId so the backend can resolve scope-aware doc IDs
+      const stream = api.chatStream(query, conversationId, resolvedDocIds);
 
       for await (const event of stream) {
         switch (event.type) {
@@ -100,48 +256,35 @@ export default function ChatPanel({ selectedDocIds, onBack, documents, onUpload,
             break;
           case 'chunk':
             fullResponse += event.content;
-            // Update the last message or create new one
-            setMessages(prev => {
-              const msgs = [...prev];
-              const lastMsg = msgs[msgs.length - 1];
-              if (lastMsg && lastMsg.role === 'assistant') {
-                msgs[msgs.length - 1] = { ...lastMsg, content: fullResponse };
-              } else {
-                msgs.push({
-                  id: 'assistant-' + Date.now(),
-                  role: 'assistant',
-                  content: fullResponse,
-                  timestamp: new Date().toISOString(),
-                });
-              }
-              return msgs;
-            });
+            setMessages((prev) =>
+              prev.map((m) => m.id === assistantId ? { ...m, content: fullResponse } : m)
+            );
             break;
           case 'citations':
             citations = event.content as Citation[];
-            setMessages(prev => {
-              const msgs = [...prev];
-              const lastMsg = msgs[msgs.length - 1];
-              if (lastMsg && lastMsg.role === 'assistant') {
-                msgs[msgs.length - 1] = { ...lastMsg, citations };
-              }
-              return msgs;
-            });
+            setMessages((prev) =>
+              prev.map((m) => m.id === assistantId ? { ...m, citations } : m)
+            );
             break;
-          case 'conversation_id':
-            newConversationId = event.content as string;
-            setConversationId(newConversationId);
+          case 'conversation_id': {
+            const cid = event.content as string;
+            setConversationId(cid);
+            onConversationIdChange?.(cid);
+            break;
+          }
+          case 'done':
             break;
         }
       }
     } catch (err) {
       console.error('Stream error:', err);
-      setMessages(prev => [...prev, {
-        id: 'error-' + Date.now(),
-        role: 'assistant',
-        content: 'An error occurred while processing your request.',
-        timestamp: new Date().toISOString(),
-      }]);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: 'An error occurred while processing your request. Please try again.' }
+            : m
+        )
+      );
     } finally {
       setIsStreaming(false);
       setStatus('');
@@ -151,57 +294,69 @@ export default function ChatPanel({ selectedDocIds, onBack, documents, onUpload,
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSubmit(e);
+      handleSubmit(e as any);
     }
   };
 
-  const selectedDocs = documents.filter(d => localDocIds.includes(d.id));
+  const SUGGESTIONS = [
+    'Summarize this document',
+    'What are the key findings?',
+    'List the main topics covered',
+    'Extract important dates or numbers',
+  ];
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-dot-dim/20">
+    <div className="flex flex-col h-full bg-dot-black">
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 bg-dot-dark/60 backdrop-blur-sm">
         <div className="flex items-center gap-3">
           <button
             onClick={onBack}
-            className="p-1.5 hover:bg-white/10 transition-colors"
+            className="p-1.5 rounded hover:bg-white/10 transition-colors"
+            aria-label="Back"
           >
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div>
-            <h2 className="font-mono text-sm font-bold">Research Session</h2>
-            {selectedDocs.length > 0 && (
-              <div className="text-xs text-dot-dim">
-                Searching {selectedDocs.length} document{selectedDocs.length !== 1 ? 's' : ''}
-              </div>
-            )}
+            <div className="flex items-center gap-2">
+              <Zap className="w-3.5 h-3.5 text-white/60" />
+              <span className="font-mono text-sm font-bold tracking-wider">Research Chat</span>
+            </div>
+            <p className="text-xs text-dot-dim mt-0.5">
+              {conversationId ? 'Active session' : 'New session'}
+            </p>
           </div>
         </div>
-        {status && (
-          <div className="flex items-center gap-2 text-xs font-mono text-dot-dim">
-            <div className="w-2 h-2 bg-white rounded-full status-pulse"></div>
-            {status}
-          </div>
-        )}
+        {status && <StatusPill status={status} />}
       </div>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-6">
+      {/* ── Context panel ── */}
+      <ContextPanel docs={documents} conversationId={conversationId} />
+
+      {/* ── Messages ── */}
+      <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
         {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-center space-y-4">
-            <div className="w-12 h-12 border border-dot-dim/30 flex items-center justify-center">
-              <FileText className="w-6 h-6 text-dot-dim" />
+          <div className="flex flex-col items-center justify-center h-full text-center space-y-6 py-16">
+            <div className="w-16 h-16 border border-white/10 flex items-center justify-center bg-white/3">
+              <BookOpen className="w-7 h-7 text-dot-dim" />
             </div>
-            <div className="space-y-2">
-              <p className="font-mono text-sm text-dot-dim">
-                Ask anything about your documents
+            <div className="space-y-2 max-w-sm">
+              <p className="font-mono text-sm font-medium">Ask anything about your documents</p>
+              <p className="text-xs text-dot-dim leading-relaxed">
+                Library documents are always available. Files uploaded here are scoped to this chat.
               </p>
-              <p className="text-xs text-dot-dim/50 max-w-xs">
-                {selectedDocs.length > 0
-                  ? `Searching in: ${selectedDocs.map(d => d.filename).join(', ')}`
-                  : 'Searching across all uploaded documents'
-                }
-              </p>
+            </div>
+            <div className="flex flex-wrap gap-2 justify-center max-w-sm">
+              {SUGGESTIONS.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setInput(s)}
+                  className="px-3 py-1.5 text-xs font-mono border border-white/10 text-dot-dim
+                             hover:border-white/30 hover:text-white transition-colors text-left"
+                >
+                  {s}
+                </button>
+              ))}
             </div>
           </div>
         )}
@@ -209,44 +364,72 @@ export default function ChatPanel({ selectedDocIds, onBack, documents, onUpload,
         {messages.map((msg) => (
           <div
             key={msg.id}
-            className={`message-enter ${msg.role === 'user' ? 'flex justify-end' : ''}`}
+            className={`message-enter flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
           >
-            <div className={`max-w-3xl ${msg.role === 'user' ? 'text-right' : ''}`}>
+            <div className={`max-w-3xl w-full ${msg.role === 'user' ? 'flex flex-col items-end' : ''}`}>
               {/* Role label */}
-              <div className={`text-xs font-mono text-dot-dim mb-2 tracking-wider`}>
-                {msg.role === 'user' ? 'YOU' : 'DOTRAG'}
+              <div className="flex items-center gap-2 mb-1.5">
+                {msg.role === 'assistant' && (
+                  <div className="w-4 h-4 bg-white rounded-full flex items-center justify-center">
+                    <div className="w-1.5 h-1.5 bg-black rounded-full" />
+                  </div>
+                )}
+                <span className="text-xs font-mono text-dot-dim tracking-wider">
+                  {msg.role === 'user' ? 'YOU' : 'DOTRAG'}
+                </span>
               </div>
 
-              {/* Message content */}
-              <div className={`text-sm leading-relaxed whitespace-pre-wrap ${msg.role === 'user' ? '' : ''}`}>
-                {msg.content}
-                {isStreaming && msg.role === 'assistant' && msg.id === messages[messages.length - 1]?.id && (
-                  <span className="cursor-blink"></span>
+              {/* Bubble */}
+              <div
+                className={`px-4 py-3 text-sm ${
+                  msg.role === 'user'
+                    ? 'bg-white/10 border border-white/15 text-white ml-12'
+                    : 'bg-dot-dark border border-white/8 text-white/90 mr-12'
+                }`}
+              >
+                {msg.role === 'user' ? (
+                  <p className="leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                ) : msg.content ? (
+                  <MessageContent content={msg.content} />
+                ) : (
+                  <div className="flex items-center gap-1 py-1">
+                    <span className="w-1.5 h-1.5 bg-dot-dim rounded-full animate-bounce [animation-delay:0ms]" />
+                    <span className="w-1.5 h-1.5 bg-dot-dim rounded-full animate-bounce [animation-delay:150ms]" />
+                    <span className="w-1.5 h-1.5 bg-dot-dim rounded-full animate-bounce [animation-delay:300ms]" />
+                  </div>
                 )}
+
+                {/* Blinking cursor while streaming */}
+                {isStreaming &&
+                  msg.role === 'assistant' &&
+                  msg.id === messages[messages.length - 1]?.id &&
+                  msg.content && (
+                    <span className="cursor-blink ml-0.5 text-dot-dim" />
+                  )}
               </div>
 
               {/* Citations */}
               {msg.citations && msg.citations.length > 0 && (
-                <div className="mt-4 space-y-2">
-                  <div className="text-xs font-mono text-dot-dim tracking-wider">
-                    SOURCES
-                  </div>
-                  <div className="space-y-1">
+                <div className="mt-2.5 mr-12 space-y-1">
+                  <p className="text-xs font-mono text-dot-dim/50 tracking-widest mb-1">SOURCES</p>
+                  <div className="flex flex-wrap gap-1.5">
                     {msg.citations.map((cite, idx) => (
-                      <button
+                      <div
                         key={idx}
-                        className="flex items-center gap-2 text-xs text-dot-dim hover:text-white
-                                   transition-colors group"
+                        title={cite.text_snippet}
+                        className="flex items-center gap-1.5 px-2 py-1 border border-white/10
+                                   bg-white/3 hover:bg-white/6 hover:border-white/20 transition-all cursor-default group"
                       >
-                        <span className="font-mono text-dot-dim/50">
-                          {String(idx + 1).padStart(2, '0')}
+                        <span className="font-mono text-xs text-dot-dim/50">
+                          [{cite.citation_index ?? idx + 1}]
                         </span>
-                        <FileText className="w-3 h-3" />
-                        <span>{cite.document_name}</span>
-                        <span className="text-dot-dim/50">·</span>
-                        <span>p.{cite.page_number}</span>
-                        <ExternalLink className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
-                      </button>
+                        <FileText className="w-3 h-3 text-dot-dim" />
+                        <span className="text-xs text-dot-dim group-hover:text-white transition-colors max-w-[140px] truncate">
+                          {cite.document_name}
+                        </span>
+                        <span className="text-xs text-dot-dim/40">p.{cite.page_number}</span>
+                        <ExternalLink className="w-2.5 h-2.5 text-dot-dim/30 group-hover:text-dot-dim transition-colors" />
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -254,53 +437,66 @@ export default function ChatPanel({ selectedDocIds, onBack, documents, onUpload,
             </div>
           </div>
         ))}
+
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input */}
-      <div className="border-t border-dot-dim/20 p-4">
-        <form onSubmit={handleSubmit} className="flex gap-3">
+      {/* ── Input ── */}
+      <div className="border-t border-white/10 p-4 bg-dot-dark/60 backdrop-blur-sm">
+        <form onSubmit={handleSubmit} className="flex items-end gap-2">
           <input
             type="file"
             ref={fileInputRef}
             onChange={handleFileUpload}
-            accept=".pdf"
+            accept=".pdf,.jpg,.jpeg,.png,.gif,.bmp,.tiff,.tif,.webp"
             className="hidden"
           />
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading || isStreaming}
-            className="px-3 py-3 border border-dot-dim/30 hover:border-white/50
-                       text-dot-dim hover:text-white transition-colors
-                       disabled:opacity-30 disabled:cursor-not-allowed"
-            title="Upload PDF"
+            title="Upload file to this chat"
+            className="p-3 border border-white/10 text-dot-dim hover:text-white
+                       hover:border-white/30 transition-all disabled:opacity-30
+                       disabled:cursor-not-allowed flex-shrink-0 group relative"
           >
             {isUploading ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
               <Paperclip className="w-4 h-4" />
             )}
+            <span className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap
+                             hidden group-hover:block text-xs font-mono text-dot-dim
+                             bg-dot-dark border border-white/10 px-2 py-0.5 pointer-events-none">
+              Upload to this chat
+            </span>
           </button>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask a question..."
-            rows={1}
-            className="flex-1 bg-dot-dark border border-dot-dim/30 px-4 py-3
-                       text-sm font-mono resize-none
-                       focus:outline-none focus:border-white/50
-                       placeholder:text-dot-dim/30"
-            disabled={isStreaming}
-          />
+
+          <div className="flex-1 relative">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value);
+                e.target.style.height = 'auto';
+                e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+              }}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask a question… (Enter to send, Shift+Enter for newline)"
+              rows={1}
+              className="w-full bg-black/40 border border-white/10 px-4 py-3
+                         text-sm font-mono resize-none overflow-hidden
+                         focus:outline-none focus:border-white/30 transition-colors
+                         placeholder:text-dot-dim/30 max-h-[120px]"
+              disabled={isStreaming}
+            />
+          </div>
+
           <button
             type="submit"
             disabled={!input.trim() || isStreaming}
-            className="px-4 py-3 bg-white text-black font-mono text-sm
-                       hover:bg-gray-200 transition-colors
-                       disabled:opacity-30 disabled:cursor-not-allowed"
+            className="p-3 bg-white text-black hover:bg-gray-100 transition-colors
+                       disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
           >
             {isStreaming ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -309,6 +505,10 @@ export default function ChatPanel({ selectedDocIds, onBack, documents, onUpload,
             )}
           </button>
         </form>
+
+        <p className="text-xs text-dot-dim/25 font-mono mt-2 text-center">
+          AI responses may contain errors · verify with source documents
+        </p>
       </div>
     </div>
   );

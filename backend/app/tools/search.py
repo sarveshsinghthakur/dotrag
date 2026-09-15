@@ -1,17 +1,37 @@
+import asyncio
 from typing import Optional
 from app.services.database import get_db
 from app.retrieval.retriever import get_retriever
 
 
+def _run_async(coro):
+    """Run an async coroutine from sync context safely.
+
+    asyncio.get_event_loop().run_until_complete() is deprecated in Python 3.10+
+    and raises RuntimeError if called from inside a running loop (FastAPI/uvicorn).
+    We use asyncio.get_event_loop() only as a last resort and prefer
+    asyncio.run() in a fresh thread when already inside a running loop.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # We're inside an async context — run in a thread pool to avoid blocking
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result()
+    else:
+        return asyncio.run(coro)
+
+
 def search_documents(query: str, document_id: Optional[str] = None, top_k: int = 8) -> dict:
     """Search across documents or within a specific document."""
-    import asyncio
-
     retriever = get_retriever(top_k=top_k)
     doc_ids = [document_id] if document_id else None
-    results = asyncio.get_event_loop().run_until_complete(
-        retriever.search(query, document_ids=doc_ids)
-    )
+    results = _run_async(retriever.search(query, document_ids=doc_ids))
     return {
         "results": [
             {
@@ -36,13 +56,13 @@ def summarize_document(document_id: str) -> dict:
         return {"error": "Document not found"}
 
     chunks = db.get_chunks_by_document(document_id)
-    full_text = "\n\n".join(c.content for c in chunks[:50])  # Limit for context
+    full_text = "\n\n".join(c.content for c in chunks[:50])
 
     return {
         "document_id": document_id,
         "filename": doc.filename,
         "page_count": doc.page_count,
-        "content": full_text[:8000],  # Limit for context window
+        "content": full_text[:8000],
     }
 
 
@@ -86,7 +106,7 @@ def get_source_info(chunk_id: str) -> dict:
     }
 
 
-# LangChain-compatible tool definitions
+# Mistral tool definitions
 TOOLS = [
     {
         "type": "function",

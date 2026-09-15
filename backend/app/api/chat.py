@@ -1,30 +1,58 @@
 import json
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from app.models import ChatRequest, ChatResponse, Message, MessageRole, Conversation, Citation
+from app.models import (
+    ChatRequest, ChatResponse, Message, MessageRole,
+    Conversation, Citation, DocumentScope,
+)
 from app.services.database import get_db
 from app.services.mistral import get_mistral_service
 from app.retrieval.retriever import get_retriever
-from app.tools import TOOLS, search_documents, summarize_document, compare_documents, get_source_info
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-SYSTEM_PROMPT = """You are DotRAG, an intelligent PDF research assistant. You help users search, understand, and analyze their uploaded documents.
+SYSTEM_PROMPT = """You are DotRAG, an intelligent document research assistant.
 
 CORE RULES:
-1. When document context is provided, use it as the primary source for answering questions.
-2. Do not invent facts that are not supported by retrieved context.
+1. When document context is provided, use it as your PRIMARY source.
+2. Do not invent facts not supported by retrieved context.
 3. Cite every important document-derived claim using [Source N] format.
-4. If the information is not present in the documents, explicitly say that it was not found.
+4. If the information is NOT in the documents, say so explicitly — never guess.
 5. Never fabricate page numbers or source references.
-6. Preserve document-specific terminology and phrasing.
-7. Distinguish between document-derived facts and your general knowledge.
-8. Keep answers concise unless the user requests detail.
-9. For general knowledge questions (not about documents), answer directly without retrieval.
+6. Preserve document-specific terminology.
+7. Distinguish between document facts and general knowledge.
+8. Be concise unless the user requests detail.
+9. For general-knowledge questions unrelated to documents, answer directly.
 10. When comparing documents, present a structured comparison.
 
-IMPORTANT: If documents are available but no specific context is provided, you can still help with general questions. Never ask users to upload documents if documents are already uploaded."""
+IMPORTANT: If no relevant context is found but documents are available, tell the user
+you couldn't find a matching section and suggest rephrasing their question."""
 
+
+def _resolve_doc_ids_for_chat(
+    db,
+    provided_doc_ids: list[str],
+    conversation_id: str | None,
+) -> list[str]:
+    """Return the correct set of document IDs to search for a given chat.
+
+    Priority:
+    1. If caller explicitly supplies doc IDs, use those (already scoped by frontend).
+    2. Otherwise, include LIBRARY docs + this chat's CHAT-scoped docs.
+    3. Fall back to all ready LIBRARY docs if no conversation_id.
+    """
+    if provided_doc_ids:
+        return provided_doc_ids
+
+    if conversation_id:
+        docs = db.list_documents_for_chat(conversation_id)
+    else:
+        docs = db.list_library_documents()
+
+    return [d.id for d in docs if d.status == "ready"]
+
+
+# ─── Non-streaming endpoint ────────────────────────────────────────────────────
 
 @router.post("/", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -50,26 +78,19 @@ async def chat(request: ChatRequest):
     )
     db.create_message(user_msg)
 
-    # Get conversation history
+    # Conversation history (exclude current message)
     history = db.get_messages_by_conversation(conversation.id, limit=10)
     conversation_history = [
         {"role": m.role.value, "content": m.content}
         for m in history[:-1]
     ]
 
-    # Try to retrieve documents if any are selected
+    # Resolve documents for this chat
+    doc_ids = _resolve_doc_ids_for_chat(db, request.document_ids, conversation.id)
+
     context = ""
     search_results = []
-    
-    # Use provided document_ids or get all ready documents
-    doc_ids = request.document_ids
-    if not doc_ids:
-        try:
-            all_docs = db.list_documents()
-            doc_ids = [d.id for d in all_docs if d.status == "ready"]
-        except Exception:
-            pass
-    
+
     if doc_ids:
         try:
             retriever = get_retriever()
@@ -78,42 +99,37 @@ async def chat(request: ChatRequest):
             if search_results:
                 context = retriever.build_context(results)
         except Exception:
-            pass  # Vector DB may not be running
+            pass
 
-    # Build messages for Mistral
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for msg in conversation_history[-5:]:
-        messages.append(msg)
-
-    user_content = request.message
-    
-    # Get list of available documents
+    # Document inventory string
     try:
         all_docs = db.list_documents()
         ready_docs = [d for d in all_docs if d.status == "ready"]
         doc_list = ", ".join([d.filename for d in ready_docs]) if ready_docs else "None"
-    except:
+    except Exception:
         doc_list = "Unknown"
-    
+
+    # Build prompt
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for msg in conversation_history[-5:]:
+        messages.append(msg)
+
     if context:
-        user_content = f"""Based on the following document context, answer the user's question.
-
-DOCUMENT CONTEXT:
-{context}
-
-AVAILABLE DOCUMENTS: {doc_list}
-
-USER QUESTION: {request.message}
-
-Remember to cite sources using [Source N] format."""
+        user_content = (
+            f"DOCUMENT CONTEXT:\n{context}\n\n"
+            f"AVAILABLE DOCUMENTS: {doc_list}\n\n"
+            f"USER QUESTION: {request.message}\n\n"
+            "Cite sources as [Source N]."
+        )
     else:
-        # Even without context, inform about available documents
-        user_content = f"""AVAILABLE DOCUMENTS: {doc_list}
+        user_content = (
+            f"AVAILABLE DOCUMENTS: {doc_list}\n\n"
+            f"USER QUESTION: {request.message}\n\n"
+            "No matching document context was retrieved. "
+            "If the question is about the documents, say so and suggest the user rephrase. "
+            "For general questions, answer directly."
+        )
 
-USER QUESTION: {request.message}
-
-If the user is asking about the documents, let them know the documents are uploaded but you need more specific questions. For general questions, answer directly."""
-    
     messages.append({"role": "user", "content": user_content})
 
     # Call Mistral
@@ -122,7 +138,7 @@ If the user is asking about the documents, let them know the documents are uploa
         response = await mistral.chat_completion(messages=messages)
         response_text = response["choices"][0]["message"].get("content", "")
     except Exception as e:
-        response_text = f"I encountered an error: {str(e)}"
+        response_text = f"I encountered an error communicating with the AI: {str(e)}"
 
     # Build citations
     citations = []
@@ -140,7 +156,6 @@ If the user is asking about the documents, let them know the documents are uploa
             )
         )
 
-    # Save assistant message
     assistant_msg = Message(
         conversation_id=conversation.id,
         role=MessageRole.ASSISTANT,
@@ -149,10 +164,8 @@ If the user is asking about the documents, let them know the documents are uploa
     )
     db.create_message(assistant_msg)
 
-    db.update_conversation(
-        conversation.id,
-        title=request.message[:50] if not conversation.title or conversation.title == "New Conversation" else conversation.title,
-    )
+    if not conversation.title or conversation.title == "New Conversation":
+        db.update_conversation(conversation.id, title=request.message[:50])
 
     return ChatResponse(
         response=response_text,
@@ -161,6 +174,8 @@ If the user is asking about the documents, let them know the documents are uploa
         tool_executions=[],
     )
 
+
+# ─── Streaming endpoint ────────────────────────────────────────────────────────
 
 @router.post("/stream")
 async def chat_stream(request: ChatRequest):
@@ -190,25 +205,21 @@ async def chat_stream(request: ChatRequest):
         for m in history[:-1]
     ]
 
+    # Snapshot for closure
+    conv_id = conversation.id
+    conv_title = conversation.title
+
     async def event_generator():
         import json as json_mod
 
-        # Status: analyzing
         yield f"data: {json_mod.dumps({'type': 'status', 'content': 'analyzing query'})}\n\n"
 
-        # Try retrieval
+        # Resolve documents
+        doc_ids = _resolve_doc_ids_for_chat(db, request.document_ids, conv_id)
+
         context = ""
         search_results = []
-        
-        # Use provided document_ids or get all ready documents
-        doc_ids = request.document_ids
-        if not doc_ids:
-            try:
-                all_docs = db.list_documents()
-                doc_ids = [d.id for d in all_docs if d.status == "ready"]
-            except Exception:
-                pass
-        
+
         if doc_ids:
             yield f"data: {json_mod.dumps({'type': 'status', 'content': 'searching documents'})}\n\n"
             try:
@@ -217,49 +228,45 @@ async def chat_stream(request: ChatRequest):
                 search_results = [r.__dict__ for r in results] if results else []
                 if search_results:
                     context = retriever.build_context(results)
-                yield f"data: {json_mod.dumps({'type': 'status', 'content': f'retrieved {len(search_results)} chunks'})}\n\n"
-            except Exception:
+                yield f"data: {json_mod.dumps({'type': 'status', 'content': f'found {len(search_results)} relevant chunks'})}\n\n"
+            except Exception as e:
                 yield f"data: {json_mod.dumps({'type': 'status', 'content': 'vector search unavailable'})}\n\n"
+        else:
+            yield f"data: {json_mod.dumps({'type': 'status', 'content': 'no documents in scope'})}\n\n"
+
+        # Document inventory
+        try:
+            all_docs = db.list_documents()
+            ready_docs = [d for d in all_docs if d.status == "ready"]
+            doc_list = ", ".join([d.filename for d in ready_docs]) if ready_docs else "None"
+        except Exception:
+            doc_list = "Unknown"
 
         # Build messages
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         for msg in conversation_history[-5:]:
             messages.append(msg)
 
-        user_content = request.message
-        
-        # Get list of available documents
-        try:
-            all_docs = db.list_documents()
-            ready_docs = [d for d in all_docs if d.status == "ready"]
-            doc_list = ", ".join([d.filename for d in ready_docs]) if ready_docs else "None"
-        except:
-            doc_list = "Unknown"
-        
         if context:
-            user_content = f"""Based on the following document context, answer the user's question.
-
-DOCUMENT CONTEXT:
-{context}
-
-AVAILABLE DOCUMENTS: {doc_list}
-
-USER QUESTION: {request.message}
-
-Remember to cite sources using [Source N] format."""
+            user_content = (
+                f"DOCUMENT CONTEXT:\n{context}\n\n"
+                f"AVAILABLE DOCUMENTS: {doc_list}\n\n"
+                f"USER QUESTION: {request.message}\n\n"
+                "Cite sources as [Source N]."
+            )
         else:
-            # Even without context, inform about available documents
-            user_content = f"""AVAILABLE DOCUMENTS: {doc_list}
+            user_content = (
+                f"AVAILABLE DOCUMENTS: {doc_list}\n\n"
+                f"USER QUESTION: {request.message}\n\n"
+                "No matching document context was retrieved. "
+                "If the question is about the documents, say so and suggest the user rephrase. "
+                "For general questions, answer directly."
+            )
 
-USER QUESTION: {request.message}
-
-If the user is asking about the documents, let them know the documents are uploaded but you need more specific questions. For general questions, answer directly."""
-        
         messages.append({"role": "user", "content": user_content})
 
         yield f"data: {json_mod.dumps({'type': 'status', 'content': 'generating response'})}\n\n"
 
-        # Stream from Mistral
         full_response = ""
         try:
             mistral = get_mistral_service()
@@ -267,14 +274,14 @@ If the user is asking about the documents, let them know the documents are uploa
                 full_response += chunk
                 yield f"data: {json_mod.dumps({'type': 'chunk', 'content': chunk})}\n\n"
         except Exception as e:
-            error_msg = f"Error: {str(e)}"
+            error_msg = f"Error communicating with AI: {str(e)}"
             full_response = error_msg
             yield f"data: {json_mod.dumps({'type': 'chunk', 'content': error_msg})}\n\n"
 
         # Citations
-        citations = []
+        citations_payload = []
         for i, result in enumerate(search_results[:5]):
-            citations.append({
+            citations_payload.append({
                 "document_name": result.get("document_name", ""),
                 "page_number": result.get("page_number", 0),
                 "chunk_id": result.get("chunk_id", ""),
@@ -284,9 +291,9 @@ If the user is asking about the documents, let them know the documents are uploa
                 "citation_index": i + 1,
             })
 
-        yield f"data: {json_mod.dumps({'type': 'citations', 'content': citations})}\n\n"
+        yield f"data: {json_mod.dumps({'type': 'citations', 'content': citations_payload})}\n\n"
 
-        # Save message
+        # Persist assistant message
         citation_models = [
             Citation(
                 message_id="",
@@ -298,23 +305,21 @@ If the user is asking about the documents, let them know the documents are uploa
                 relevance_score=c.get("score", 0),
                 citation_index=c.get("citation_index", 0),
             )
-            for c in citations
+            for c in citations_payload
         ]
 
         assistant_msg = Message(
-            conversation_id=conversation.id,
+            conversation_id=conv_id,
             role=MessageRole.ASSISTANT,
             content=full_response,
             citations=citation_models,
         )
         db.create_message(assistant_msg)
 
-        db.update_conversation(
-            conversation.id,
-            title=request.message[:50] if not conversation.title or conversation.title == "New Conversation" else conversation.title,
-        )
+        if not conv_title or conv_title == "New Conversation":
+            db.update_conversation(conv_id, title=request.message[:50])
 
-        yield f"data: {json_mod.dumps({'type': 'conversation_id', 'content': conversation.id})}\n\n"
+        yield f"data: {json_mod.dumps({'type': 'conversation_id', 'content': conv_id})}\n\n"
         yield f"data: {json_mod.dumps({'type': 'status', 'content': 'complete'})}\n\n"
         yield f"data: {json_mod.dumps({'type': 'done', 'content': ''})}\n\n"
 

@@ -1,9 +1,16 @@
+export type DocumentScope = 'library' | 'chat';
+export type FileType = 'pdf' | 'image' | 'unknown';
+export type DocumentStatus = 'uploading' | 'processing' | 'indexing' | 'ready' | 'error';
+
 export interface Document {
   id: string;
   filename: string;
+  file_type: FileType;
   page_count: number;
   file_size: number;
-  status: 'uploading' | 'processing' | 'indexing' | 'ready' | 'error';
+  status: DocumentStatus;
+  scope: DocumentScope;
+  conversation_id: string | null;
   created_at: string;
   chunk_count: number;
 }
@@ -19,11 +26,11 @@ export interface SearchResult {
 }
 
 export interface Citation {
-  id: string;
+  id?: string;
   document_id: string;
   document_name: string;
   page_number: number;
-  chunk_id: string;
+  chunk_id?: string;
   text_snippet: string;
   relevance_score: number;
   citation_index: number;
@@ -76,4 +83,9 @@ export interface SearchResponse {
 export interface StreamEvent {
   type: 'status' | 'chunk' | 'citations' | 'conversation_id' | 'done';
   content: string | Citation[];
+}
+
+export interface UploadOptions {
+  scope: DocumentScope;
+  conversation_id?: string;
 }

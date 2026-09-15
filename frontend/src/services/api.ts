@@ -1,19 +1,34 @@
+import type { UploadOptions } from '../types';
+
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 export const api = {
-  async uploadDocument(file: File) {
+  // ─── Documents ──────────────────────────────────────────────────────────────
+
+  async uploadDocument(file: File, options: UploadOptions = { scope: 'library' }) {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('scope', options.scope);
+    if (options.conversation_id) {
+      formData.append('conversation_id', options.conversation_id);
+    }
     const res = await fetch(`${API_BASE}/documents/upload`, {
       method: 'POST',
       body: formData,
     });
-    if (!res.ok) throw new Error('Upload failed');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Upload failed' }));
+      throw new Error(err.detail || 'Upload failed');
+    }
     return res.json();
   },
 
-  async getDocuments() {
-    const res = await fetch(`${API_BASE}/documents/`);
+  async getDocuments(scope?: string, conversation_id?: string) {
+    const params = new URLSearchParams();
+    if (scope) params.set('scope', scope);
+    if (conversation_id) params.set('conversation_id', conversation_id);
+    const url = `${API_BASE}/documents/${params.toString() ? '?' + params.toString() : ''}`;
+    const res = await fetch(url);
     if (!res.ok) throw new Error('Failed to fetch documents');
     return res.json();
   },
@@ -30,6 +45,8 @@ export const api = {
     return res.json();
   },
 
+  // ─── Search ─────────────────────────────────────────────────────────────────
+
   async search(query: string, documentIds: string[] = [], topK: number = 8) {
     const res = await fetch(`${API_BASE}/search/`, {
       method: 'POST',
@@ -40,11 +57,17 @@ export const api = {
     return res.json();
   },
 
+  // ─── Chat ───────────────────────────────────────────────────────────────────
+
   async chat(message: string, conversationId?: string, documentIds: string[] = []) {
     const res = await fetch(`${API_BASE}/chat/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, conversation_id: conversationId, document_ids: documentIds }),
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+        document_ids: documentIds,
+      }),
     });
     if (!res.ok) throw new Error('Chat failed');
     return res.json();
@@ -54,7 +77,11 @@ export const api = {
     const res = await fetch(`${API_BASE}/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, conversation_id: conversationId, document_ids: documentIds }),
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+        document_ids: documentIds,
+      }),
     });
 
     if (!res.ok) throw new Error('Stream failed');
@@ -79,12 +106,14 @@ export const api = {
             const data = JSON.parse(line.slice(6));
             yield data;
           } catch {
-            // Skip malformed JSON
+            // skip malformed
           }
         }
       }
     }
   },
+
+  // ─── Pages / File ───────────────────────────────────────────────────────────
 
   async getDocumentPage(documentId: string, pageNumber: number) {
     const res = await fetch(`${API_BASE}/documents/${documentId}/pages/${pageNumber}`);

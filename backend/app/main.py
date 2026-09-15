@@ -9,12 +9,22 @@ from app.api import documents_router, chat_router, search_router, health_router
 async def lifespan(app: FastAPI):
     # Startup
     print("[INFO] DotRAG API starting up...")
+    # Ensure upload/temp directories exist
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
     yield
-    # Shutdown
+    # Shutdown — close any open service connections
     print("[INFO] DotRAG API shutting down...")
-    from app.services.mistral import get_mistral_service
-    from app.services.vector_store import get_vector_store
-    await get_mistral_service().close()
+    try:
+        from app.services.mistral import get_mistral_service
+        await get_mistral_service().close()
+    except Exception:
+        pass
+    try:
+        from app.services.vector_store import get_vector_store
+        await get_vector_store().close()
+    except Exception:
+        pass
 
 
 app = FastAPI(

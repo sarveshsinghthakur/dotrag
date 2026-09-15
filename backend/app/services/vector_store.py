@@ -1,60 +1,77 @@
 import uuid
 import json
 from typing import Optional
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance, VectorParams, PointStruct,
-    Filter, FieldCondition, MatchValue
-)
 from app.config import settings
 from app.services.mistral import get_mistral_service
 
 
 class VectorStore:
-    """Qdrant vector store service."""
+    """Qdrant vector store service.
+
+    mistral-embed produces 1024-dimensional vectors — the collection is
+    created with size=1024 accordingly.
+    """
 
     COLLECTION_NAME = "dotrag_chunks"
+    VECTOR_SIZE = 1024  # mistral-embed output dimension
 
     def __init__(self):
-        self.client: Optional[QdrantClient] = None
-        self._ensure_collection()
+        self.client = None
+        self._initialized = False
 
-    def _get_client(self) -> QdrantClient:
+    def _get_client(self):
         if self.client is None:
-            self.client = QdrantClient(
-                url=settings.QDRANT_URL,
-                api_key=settings.QDRANT_API_KEY or None,
-            )
+            try:
+                from qdrant_client import QdrantClient
+                self.client = QdrantClient(
+                    url=settings.QDRANT_URL,
+                    api_key=settings.QDRANT_API_KEY or None,
+                    timeout=30,
+                )
+            except Exception as e:
+                raise RuntimeError(f"Cannot connect to Qdrant at {settings.QDRANT_URL}: {e}")
         return self.client
 
     def _ensure_collection(self):
-        client = self._get_client()
-        collections = client.get_collections().collections
-        collection_names = [c.name for c in collections]
-        if self.COLLECTION_NAME not in collection_names:
-            client.create_collection(
-                collection_name=self.COLLECTION_NAME,
-                vectors_config=VectorParams(size=4096, distance=Distance.COSINE),
-            )
+        """Create collection if it doesn't exist yet."""
+        if self._initialized:
+            return
+        try:
+            from qdrant_client.models import VectorParams, Distance
+            client = self._get_client()
+            collections = client.get_collections().collections
+            collection_names = [c.name for c in collections]
+            if self.COLLECTION_NAME not in collection_names:
+                client.create_collection(
+                    collection_name=self.COLLECTION_NAME,
+                    vectors_config=VectorParams(
+                        size=self.VECTOR_SIZE, distance=Distance.COSINE
+                    ),
+                )
+            self._initialized = True
+        except Exception:
+            # Qdrant may not be available; swallow and retry on next operation
+            pass
 
     async def add_chunks(
         self, chunk_ids: list[str], texts: list[str], metadatas: list[dict]
     ) -> list[str]:
+        from qdrant_client.models import PointStruct
+        self._ensure_collection()
         mistral = get_mistral_service()
-        embeddings = await mistral.get_embeddings(texts, input_type="passage")
+        embeddings = await mistral.get_embeddings(texts)
 
         client = self._get_client()
         points = []
-        for i, (chunk_id, embedding, metadata) in enumerate(
-            zip(chunk_ids, embeddings, metadatas)
-        ):
-            # Convert metadata values to strings for Qdrant
-            payload = {}
+        for chunk_id, embedding, metadata in zip(chunk_ids, embeddings, metadatas):
+            # Sanitise payload: Qdrant accepts str/int/float/bool only
+            payload: dict = {}
             for k, v in metadata.items():
                 if isinstance(v, (str, int, float, bool)):
                     payload[k] = v
                 else:
                     payload[k] = json.dumps(v, default=str)
+
             points.append(
                 PointStruct(
                     id=str(uuid.uuid5(uuid.NAMESPACE_URL, chunk_id)),
@@ -68,7 +85,7 @@ class VectorStore:
         for i in range(0, len(points), batch_size):
             client.upsert(
                 collection_name=self.COLLECTION_NAME,
-                points=points[i : i + batch_size],
+                points=points[i: i + batch_size],
             )
 
         return chunk_ids
@@ -80,8 +97,10 @@ class VectorStore:
         document_id: Optional[str] = None,
         score_threshold: float = 0.3,
     ) -> list[dict]:
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        self._ensure_collection()
         mistral = get_mistral_service()
-        query_embedding = (await mistral.get_embeddings([query], input_type="query"))[0]
+        query_embedding = (await mistral.get_embeddings([query]))[0]
 
         client = self._get_client()
 
@@ -122,6 +141,7 @@ class VectorStore:
         return search_results
 
     def delete_by_document(self, document_id: str):
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
         client = self._get_client()
         client.delete(
             collection_name=self.COLLECTION_NAME,
@@ -135,6 +155,7 @@ class VectorStore:
     async def close(self):
         if self.client:
             self.client.close()
+            self.client = None
 
 
 _vector_store_instance: Optional[VectorStore] = None

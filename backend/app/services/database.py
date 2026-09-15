@@ -1,12 +1,11 @@
 import json
-import uuid
 from datetime import datetime
 from typing import Optional
-from app.models import Document, DocumentChunk, Conversation, Message, Citation, DocumentStatus
+from app.models import Document, DocumentChunk, Conversation, Message, DocumentStatus, DocumentScope
 
 
 class DatabaseService:
-    """In-memory database with optional JSON persistence. Replace with PostgreSQL in production."""
+    """In-memory database with optional JSON persistence."""
 
     def __init__(self, db_path: str = "dotrag_db.json"):
         self.db_path = db_path
@@ -22,36 +21,52 @@ class DatabaseService:
         if self._in_memory:
             return
         try:
-            with open(self.db_path, "r") as f:
+            with open(self.db_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                for d in data.get("documents", []):
+            for d in data.get("documents", []):
+                try:
                     doc = Document(**d)
                     self.documents[doc.id] = doc
-                for c in data.get("chunks", []):
+                except Exception:
+                    pass
+            for c in data.get("chunks", []):
+                try:
                     chunk = DocumentChunk(**c)
                     self.chunks[chunk.id] = chunk
-                for conv in data.get("conversations", []):
+                except Exception:
+                    pass
+            for conv in data.get("conversations", []):
+                try:
                     conversation = Conversation(**conv)
                     self.conversations[conversation.id] = conversation
-                for msg in data.get("messages", []):
+                except Exception:
+                    pass
+            for msg in data.get("messages", []):
+                try:
                     message = Message(**msg)
                     self.messages[message.id] = message
+                except Exception:
+                    pass
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
     def _save(self):
         if self._in_memory:
             return
+        import os
         data = {
             "documents": [d.model_dump(mode="json") for d in self.documents.values()],
             "chunks": [c.model_dump(mode="json") for c in self.chunks.values()],
             "conversations": [c.model_dump(mode="json") for c in self.conversations.values()],
             "messages": [m.model_dump(mode="json") for m in self.messages.values()],
         }
-        with open(self.db_path, "w") as f:
-            json.dump(data, f, default=str)
+        tmp_path = self.db_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, default=str, ensure_ascii=False)
+        os.replace(tmp_path, self.db_path)
 
-    # Documents
+    # ──────────────────── Documents ────────────────────
+
     def create_document(self, doc: Document) -> Document:
         self.documents[doc.id] = doc
         self._save()
@@ -62,6 +77,18 @@ class DatabaseService:
 
     def list_documents(self) -> list[Document]:
         return sorted(self.documents.values(), key=lambda d: d.created_at, reverse=True)
+
+    def list_library_documents(self) -> list[Document]:
+        """Return only LIBRARY-scoped documents."""
+        return [d for d in self.list_documents() if d.scope == DocumentScope.LIBRARY]
+
+    def list_documents_for_chat(self, conversation_id: str) -> list[Document]:
+        """Return LIBRARY docs + docs scoped to this specific chat."""
+        return [
+            d for d in self.list_documents()
+            if d.scope == DocumentScope.LIBRARY
+            or (d.scope == DocumentScope.CHAT and d.conversation_id == conversation_id)
+        ]
 
     def update_document(self, doc_id: str, **kwargs) -> Optional[Document]:
         doc = self.documents.get(doc_id)
@@ -78,18 +105,21 @@ class DatabaseService:
         if doc_id not in self.documents:
             return False
         del self.documents[doc_id]
-        # Remove associated chunks
         self.chunks = {k: v for k, v in self.chunks.items() if v.document_id != doc_id}
         self._save()
         return True
 
-    # Chunks
+    # ──────────────────── Chunks ────────────────────
+
     def create_chunk(self, chunk: DocumentChunk) -> DocumentChunk:
         self.chunks[chunk.id] = chunk
         return chunk
 
     def get_chunks_by_document(self, doc_id: str) -> list[DocumentChunk]:
-        return [c for c in self.chunks.values() if c.document_id == doc_id]
+        return sorted(
+            [c for c in self.chunks.values() if c.document_id == doc_id],
+            key=lambda c: (c.page_number, c.chunk_index),
+        )
 
     def get_chunk(self, chunk_id: str) -> Optional[DocumentChunk]:
         return self.chunks.get(chunk_id)
@@ -99,7 +129,8 @@ class DatabaseService:
             self.chunks[chunk.id] = chunk
         self._save()
 
-    # Conversations
+    # ──────────────────── Conversations ────────────────────
+
     def create_conversation(self, conv: Conversation) -> Conversation:
         self.conversations[conv.id] = conv
         self._save()
@@ -122,7 +153,8 @@ class DatabaseService:
         self._save()
         return conv
 
-    # Messages
+    # ──────────────────── Messages ────────────────────
+
     def create_message(self, msg: Message) -> Message:
         self.messages[msg.id] = msg
         self._save()
@@ -132,7 +164,8 @@ class DatabaseService:
         msgs = [m for m in self.messages.values() if m.conversation_id == conv_id]
         return sorted(msgs, key=lambda m: m.created_at)[-limit:]
 
-    # Cleanup
+    # ──────────────────── Maintenance ────────────────────
+
     def cleanup(self):
         self.documents.clear()
         self.chunks.clear()

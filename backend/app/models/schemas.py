@@ -13,13 +13,21 @@ class DocumentStatus(str, Enum):
     ERROR = "error"
 
 
+class DocumentScope(str, Enum):
+    LIBRARY = "library"   # Available to all chats (global)
+    CHAT = "chat"         # Scoped to a specific chat session
+
+
 class Document(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     filename: str
     file_path: str
+    file_type: str = "pdf"          # pdf, image, txt, docx, etc.
     page_count: int = 0
     file_size: int = 0
     status: DocumentStatus = DocumentStatus.UPLOADING
+    scope: DocumentScope = DocumentScope.LIBRARY
+    conversation_id: Optional[str] = None  # set when scope == CHAT
     error_message: Optional[str] = None
     metadata: dict = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -140,8 +148,11 @@ class CompareRequest(BaseModel):
 class DocumentInfo(BaseModel):
     id: str
     filename: str
+    file_type: str = "pdf"
     page_count: int
     file_size: int
     status: DocumentStatus
+    scope: DocumentScope = DocumentScope.LIBRARY
+    conversation_id: Optional[str] = None
     created_at: datetime
     chunk_count: int = 0

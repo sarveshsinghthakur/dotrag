@@ -12,4 +12,18 @@ export default defineConfig({
       },
     },
   },
+  optimizeDeps: {
+    // Ensure pdfjs-dist is pre-bundled correctly
+    include: ['react-pdf', 'pdfjs-dist'],
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        // Keep the PDF worker as a separate chunk
+        manualChunks: {
+          'pdf-worker': ['pdfjs-dist'],
+        },
+      },
+    },
+  },
 })

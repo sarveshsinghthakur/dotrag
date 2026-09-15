@@ -36,9 +36,9 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 100
     OCR_ENABLED: bool = True
 
-    # Paths
-    UPLOAD_DIR: Path = Path("uploads")
-    TEMP_DIR: Path = Path("temp")
+    # Paths — anchored to backend/ so they resolve correctly regardless of CWD
+    UPLOAD_DIR: Path = Path(__file__).resolve().parent.parent / "uploads"
+    TEMP_DIR: Path = Path(__file__).resolve().parent.parent / "temp"
 
     model_config = {"env_file": str(Path(__file__).resolve().parent.parent.parent / ".env"), "env_file_encoding": "utf-8"}
 

@@ -2,13 +2,21 @@
 @tailwind components;
 @tailwind utilities;
 
-* {
+/* ─── Reset & Base ─────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
   margin: 0;
   padding: 0;
-  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
 }
 
 body {
+  height: 100%;
   font-family: 'Inter', system-ui, sans-serif;
   background-color: #000;
   color: #fff;
@@ -16,86 +24,88 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Dot matrix background */
+#root {
+  height: 100%;
+}
+
+/* ─── Dot-matrix background ────────────────────────────── */
 .dot-matrix-bg {
-  background-image: radial-gradient(circle, #222 1px, transparent 1px);
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.07) 1px, transparent 1px);
   background-size: 24px 24px;
 }
 
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
+/* ─── Scrollbar ────────────────────────────────────────── */
+::-webkit-scrollbar        { width: 4px; height: 4px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: rgba(255,255,255,0.10); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
 
-::-webkit-scrollbar-track {
-  background: #000;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #333;
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #444;
-}
-
-/* Blinking cursor */
+/* ─── Blinking cursor ──────────────────────────────────── */
 .cursor-blink::after {
-  content: '|';
-  animation: blink 1s step-end infinite;
+  content: '▋';
+  animation: blink 0.9s step-end infinite;
+  font-size: 0.75em;
+  margin-left: 1px;
+  vertical-align: middle;
 }
 
 @keyframes blink {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+  50%       { opacity: 0; }
 }
 
-/* Status indicator pulse */
+/* ─── Status pulse ─────────────────────────────────────── */
 .status-pulse {
-  animation: pulse 2s ease-in-out infinite;
+  animation: statusPulse 2.4s ease-in-out infinite;
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
+@keyframes statusPulse {
+  0%, 100% { opacity: 0.3; }
+  50%       { opacity: 1;   }
 }
 
-/* Message animation */
+/* ─── Message enter ────────────────────────────────────── */
 .message-enter {
-  animation: messageEnter 0.3s ease-out;
+  animation: messageEnter 0.22s ease-out both;
 }
 
 @keyframes messageEnter {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
 }
 
-/* Processing animation */
-.processing-step {
-  animation: stepIn 0.2s ease-out;
+/* ─── Fade in ──────────────────────────────────────────── */
+.fade-in {
+  animation: fadeIn 0.3s ease-out both;
 }
 
-@keyframes stepIn {
-  from {
-    opacity: 0;
-    transform: translateX(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
-/* Selection */
+/* ─── Slide up ─────────────────────────────────────────── */
+.slide-up {
+  animation: slideUp 0.25s ease-out both;
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+/* ─── Selection ────────────────────────────────────────── */
 ::selection {
-  background: #fff;
-  color: #000;
+  background: rgba(255,255,255,0.18);
+  color: #fff;
 }
+
+/* ─── react-pdf ────────────────────────────────────────── */
+.react-pdf__Page          { background: #fff; }
+.react-pdf__Page__canvas  { max-width: 100%; height: auto !important; }
+
+/* ─── Tailwind doesn't generate these by default ───────── */
+.bg-white\/2   { background-color: rgba(255,255,255,0.02) !important; }
+.bg-white\/3   { background-color: rgba(255,255,255,0.03) !important; }
+.bg-white\/6   { background-color: rgba(255,255,255,0.06) !important; }
+.border-white\/8 { border-color: rgba(255,255,255,0.08) !important; }
